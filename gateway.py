@@ -5,28 +5,25 @@ from dataclasses import dataclass
 from queue import Queue, Empty
 from threading import Event, Lock
 from typing import Any, Dict, Optional
-
-from .lif import LIFAggregator
-from .inhibition import InhibitionState
-
+from lif import LIFAggregator
+from inhibition import InhibitionState
 
 @dataclass
 class GatewayStats:
     fires: int = 0
     suppressed_total: int = 0
 
-
 class Gateway:
     def __init__(
         self,
         inq: Queue,
         inhibition: InhibitionState,
-        agg_leak: float,
-        agg_theta: float,
-        beta: float,
-        t_inh_steps: int,
-        tx_power_w: float,
-        payload_bytes: int,
+        agg_leak: float = 0.995,
+        agg_theta: float = 10.0,
+        beta: float = 2.0,
+        t_inh_steps: int = 5,
+        tx_power_w: float = 0.396,
+        payload_bytes: int = 12,
         collision_mode: str = "spikes",
         retention_multiplier: float = 10.0,
         min_retention_s: float = 2.0,
@@ -42,16 +39,14 @@ class Gateway:
         self.collision_mode = str(collision_mode)
         self.retention_multiplier = float(retention_multiplier)
         self.min_retention_s = float(min_retention_s)
-
         self._recent_msgs: deque[Dict[str, Any]] = deque(maxlen=max_recent)
         self._recent_tx: list[Dict[str, Any]] = []
-
         self._total_messages = 0
         self._total_collided_messages = 0
         self._total_pairwise_overlaps = 0
         self._per_node_collisions: Dict[int, int] = {}
         self._per_node_pairwise: Dict[int, int] = {}
-
+        self._per_node_suppressed: Dict[int, int] = {}
         self.stats = GatewayStats()
         self._lock = Lock()
         self._stop = Event()
@@ -79,45 +74,40 @@ class Gateway:
         energy = airtime * self.tx_power_w
         start_s = now
         end_s = now + airtime
-
         msg["airtime_s"] = airtime
         msg["energy_j"] = energy
         msg["start_s"] = start_s
         msg["end_s"] = end_s
-
         spike_flag = int(msg.get("spike", 0)) == 1
         if spike_flag:
             fired = self.aggregator.step(1.0)
             if fired:
                 self.stats.fires += 1
                 self.inhibition.activate(self.beta, self.t_inh_steps)
-
-        st = msg.get("suppressed_total")
-        if st is not None:
-            try:
-                st_int = int(st)
-            except Exception:
-                st_int = None
-            if st_int is not None and st_int > self.stats.suppressed_total:
-                self.stats.suppressed_total = st_int
-
-        self._recent_msgs.append(msg)
-        self._total_messages += 1
-
         node_raw = msg.get("node")
         try:
             node_id = int(node_raw)
         except Exception:
             node_id = None
-
+        st = msg.get("suppressed_total")
+        if st is not None and node_id is not None:
+            try:
+                st_int = int(st)
+            except Exception:
+                st_int = None
+            if st_int is not None:
+                prev = self._per_node_suppressed.get(node_id, 0)
+                if st_int != prev:
+                    self._per_node_suppressed[node_id] = st_int
+                    self.stats.suppressed_total = sum(self._per_node_suppressed.values())
+        self._recent_msgs.append(msg)
+        self._total_messages += 1
         if node_id is None:
             return
-
         if self.collision_mode == "spikes":
             is_tx = spike_flag
         else:
             is_tx = True
-
         new_entry = {
             "node": node_id,
             "start": start_s,
@@ -125,7 +115,6 @@ class Gateway:
             "is_tx": bool(is_tx),
             "collided": False,
         }
-
         if is_tx:
             overlaps: list[Dict[str, Any]] = []
             for ent in self._recent_tx:
@@ -138,7 +127,6 @@ class Gateway:
                 if e <= start_s or s >= end_s:
                     continue
                 overlaps.append(ent)
-
             if overlaps:
                 self._total_pairwise_overlaps += len(overlaps)
                 for ent in overlaps:
@@ -152,7 +140,6 @@ class Gateway:
                 self._total_collided_messages += 1
                 self._per_node_collisions[node_id] = self._per_node_collisions.get(node_id, 0) + 1
                 self._per_node_pairwise[node_id] = self._per_node_pairwise.get(node_id, 0) + len(overlaps)
-
         self._recent_tx.append(new_entry)
         cutoff = time.time() - max(self.min_retention_s, airtime * self.retention_multiplier)
         self._recent_tx = [t for t in self._recent_tx if float(t.get("end", 0.0)) >= cutoff]
@@ -174,7 +161,6 @@ class Gateway:
         with self._lock:
             data = list(self._recent_msgs)
             timestamps = [d.get("ts") for d in data]
-
             nodes_values: Dict[str, Dict[str, float]] = {}
             for d in data:
                 ts = d.get("ts")
@@ -187,11 +173,9 @@ class Gateway:
                     nodes_values[key][ts] = float(d.get("value", 0.0))
                 except Exception:
                     nodes_values[key][ts] = 0.0
-
             nodes: Dict[str, Dict[str, Any]] = {}
             for key, series in nodes_values.items():
                 nodes[key] = {"values": [series.get(ts) for ts in timestamps]}
-
             if data:
                 now = time.time()
                 window = 60.0
@@ -211,7 +195,6 @@ class Gateway:
             else:
                 msgs_per_sec = 0.0
                 last_iso = None
-
             summary: Dict[str, Dict[str, float]] = {}
             for d in data:
                 node = d.get("node")
@@ -229,7 +212,6 @@ class Gateway:
                         entry["energy_total"] += float(e)
                     except Exception:
                         pass
-
             for node_int, c in self._per_node_collisions.items():
                 key = str(node_int)
                 entry = summary.setdefault(
@@ -237,7 +219,6 @@ class Gateway:
                     {"count": 0, "energy_total": 0.0, "collisions": 0, "pairwise_collisions": 0},
                 )
                 entry["collisions"] = c
-
             for node_int, p in self._per_node_pairwise.items():
                 key = str(node_int)
                 entry = summary.setdefault(
@@ -245,13 +226,11 @@ class Gateway:
                     {"count": 0, "energy_total": 0.0, "collisions": 0, "pairwise_collisions": 0},
                 )
                 entry["pairwise_collisions"] = p
-
             agg = {
                 "fires": self.stats.fires,
                 "theta": self.aggregator.theta,
                 "suppressed_total": self.stats.suppressed_total,
             }
-
             return {
                 "nodes": nodes,
                 "timestamps": timestamps,

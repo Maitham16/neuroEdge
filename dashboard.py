@@ -2,14 +2,13 @@ from __future__ import annotations
 import json
 from wsgiref.simple_server import make_server
 from typing import Callable
-from .gateway import Gateway
 
 HTML = """
 <!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>EdgeSynapse: Towards Leaky-Spike Transmission for Sustainable Edge Sensing Dashboard</title>
+<title>EdgeSim Network Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
 *{box-sizing:border-box}
@@ -47,7 +46,7 @@ canvas{width:100%;height:100%}
 <body>
 <div class="header">
 <div>
-<div class="header-title">EdgeSynapse: Towards Leaky-Spike Transmission for Sustainable Edge Sensing Dashboard</div>
+<div class="header-title">EdgeSim Network Dashboard</div>
 <div class="header-sub">LIF-based spiking, inhibition and LoRa energy model</div>
 </div>
 <div class="badge" id="lastUpdated">waiting data</div>
@@ -154,7 +153,6 @@ let rateChart;
 let selectedNodes={};
 let rateHistory=[];
 let fetchTimer=null;
-
 function initCharts(){
 const tsCtx=document.getElementById("tsChart").getContext("2d");
 const enCtx=document.getElementById("energyChart").getContext("2d");
@@ -165,13 +163,11 @@ energyChart=new Chart(enCtx,{type:"bar",data:{labels:[],datasets:[{label:"Energy
 collisionChart=new Chart(colCtx,{type:"bar",data:{labels:[],datasets:[{label:"Overlapping TX",data:[]}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{font:{size:10}}},y:{ticks:{font:{size:10}},beginAtZero:true,precision:0}}}});
 rateChart=new Chart(rateCtx,{type:"line",data:{labels:[],datasets:[{label:"msg/s",data:[]}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{maxRotation:0,font:{size:10}}},y:{ticks:{font:{size:10}},beginAtZero:true}}}});
 }
-
 function formatTime(ts){
 if(!ts)return"";
 const d=new Date(ts);
 return d.toLocaleTimeString("en-GB",{hour12:false});
 }
-
 function buildNodeList(nodes){
 const ids=Object.keys(nodes).sort(function(a,b){return Number(a)-Number(b)});
 const container=document.getElementById("nodeList");
@@ -191,7 +187,6 @@ if(selectedNodes[id])selected+=1;
 });
 document.getElementById("nodeMeta").textContent="selected: "+selected+"/"+ids.length;
 }
-
 function updateCharts(metrics){
 const ts=metrics.timestamps||[];
 const nodes=metrics.nodes||{};
@@ -199,7 +194,6 @@ buildNodeList(nodes);
 const datasets=[];
 let globalMin=null;
 let globalMax=null;
-
 Object.keys(nodes).forEach(function(id){
 if(!selectedNodes[id])return;
 const vals=nodes[id].values||[];
@@ -211,7 +205,6 @@ if(globalMin===null||v<globalMin)globalMin=v;
 if(globalMax===null||v>globalMax)globalMax=v;
 }
 });
-
 tsChart.data.labels=ts.map(formatTime);
 tsChart.data.datasets=datasets;
 if(globalMin!==null&&globalMax!==null){
@@ -227,20 +220,16 @@ tsChart.options.scales.y.max=undefined;
 document.getElementById("rangeInfo").textContent="range: -";
 }
 tsChart.update();
-
 const summary=metrics.summary||{};
 const nodeIds=Object.keys(summary).sort(function(a,b){return Number(a)-Number(b)});
 energyChart.data.labels=nodeIds.map(function(id){return"Node "+id});
 energyChart.data.datasets[0].data=nodeIds.map(function(id){return summary[id].energy_total||0});
 energyChart.update();
-
 collisionChart.data.labels=nodeIds.map(function(id){return"Node "+id});
 collisionChart.data.datasets[0].data=nodeIds.map(function(id){return summary[id].collisions||0});
 collisionChart.update();
-
 const nowIso=metrics.last_updated_iso;
 if(nowIso)document.getElementById("lastUpdated").textContent=formatTime(nowIso);
-
 const rate=metrics.msgs_per_sec||0;
 const now=new Date().toISOString();
 rateHistory.push({ts:now,rate:rate});
@@ -249,7 +238,6 @@ rateChart.data.labels=rateHistory.map(function(r){return formatTime(r.ts)});
 rateChart.data.datasets[0].data=rateHistory.map(function(r){return r.rate});
 rateChart.update();
 }
-
 function updateKpis(metrics){
 const nodes=metrics.nodes||{};
 document.getElementById("kpiNodes").textContent=Object.keys(nodes).length;
@@ -260,19 +248,16 @@ rateLabel.textContent=rate.toFixed(2)+" msg/s";
 if(rate<0.1){rateLabel.className="card-sub kpi-strong";}
 else if(rate<1.0){rateLabel.className="card-sub kpi-warn";}
 else{rateLabel.className="card-sub kpi-bad";}
-
 const agg=metrics.aggregator||{};
 document.getElementById("kpiAggFires").textContent=agg.fires||0;
 document.getElementById("kpiAggTheta").textContent="θ: "+(agg.theta!=null?Number(agg.theta).toFixed(1):"-");
 document.getElementById("kpiSuppressed").textContent=agg.suppressed_total||0;
-
-document.getElementById("kpiPairs").textContent = metrics.total_collided_messages || 0;
+document.getElementById("kpiPairs").textContent=metrics.total_collided_messages||0;
 const modeRaw=metrics.collision_mode||"-";
 let modeLabel=modeRaw;
 if(modeRaw==="spikes")modeLabel="spike packets only";
 if(modeRaw==="all")modeLabel="all packets";
 document.getElementById("kpiCollMode").textContent="mode: "+modeLabel;
-
 const inh=metrics.inhibition||{};
 const beta=inh.beta!=null?Number(inh.beta):1.0;
 document.getElementById("kpiBeta").textContent="β="+beta.toFixed(2);
@@ -280,9 +265,7 @@ const now=timeNowSeconds();
 const expiry=inh.expiry_ts||0;
 document.getElementById("kpiInhState").textContent=expiry>now?"active":"idle";
 }
-
 function timeNowSeconds(){return Date.now()/1000.0;}
-
 async function fetchMetrics(){
 if(document.getElementById("pause").checked)return;
 try{
@@ -292,14 +275,12 @@ updateKpis(m);
 updateCharts(m);
 }catch(e){}
 }
-
 function scheduleFetch(){
 if(fetchTimer!==null)clearInterval(fetchTimer);
 let interval=parseInt(document.getElementById("refresh").value,10);
 if(!interval||interval<1)interval=2;
 fetchTimer=setInterval(fetchMetrics,interval*1000);
 }
-
 document.getElementById("refresh").addEventListener("change",scheduleFetch);
 initCharts();
 scheduleFetch();
@@ -309,7 +290,7 @@ fetchMetrics();
 </html>
 """
 
-def make_app(gateway: "Gateway") -> Callable:
+def make_app(gateway) -> Callable:
     def app(environ, start_response):
         path = environ.get("PATH_INFO", "")
         if path == "/metrics":
@@ -325,9 +306,7 @@ def make_app(gateway: "Gateway") -> Callable:
                 return [data.encode("utf-8")]
             except Exception as e:
                 payload = json.dumps({"error": str(e)})
-                start_response(
-                    "500 Internal Server Error", [("Content-Type", "application/json")]
-                )
+                start_response("500 Internal Server Error", [("Content-Type", "application/json")])
                 return [payload.encode("utf-8")]
         if path == "/":
             headers = [("Content-Type", "text/html; charset=utf-8")]
@@ -337,7 +316,7 @@ def make_app(gateway: "Gateway") -> Callable:
         return [b"Not Found"]
     return app
 
-def run_http(gateway: "Gateway", host: str, port: int) -> None:
+def run_http(gateway, host: str, port: int) -> None:
     app = make_app(gateway)
     server = make_server(host, port, app)
     server.serve_forever()

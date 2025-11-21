@@ -2,54 +2,61 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 @dataclass
-class LIFState:
-    u: float = 0.0
-    r: int = 0
+class LIFConfig:
+    leak: float = 0.99
+    theta: float = 50.0
+    refractory: int = 0
 
 class LIFSensor:
-    def __init__(self, leak: float, theta: float, rho: int) -> None:
+    def __init__(self, leak: float = 0.99, theta: float = 50.0, refractory: int = 0):
         self.leak = float(leak)
         self.theta_base = float(theta)
         self.theta = float(theta)
-        self.rho = int(rho)
-        self.state = LIFState()
+        self.refractory = int(refractory)
+        self.u = 0.0
+        self._r = 0
 
     def reset(self) -> None:
-        self.state = LIFState()
-        self.theta = self.theta_base
+        self.u = 0.0
+        self._r = 0
 
-    def step(self, I: float, beta: float = 1.0) -> tuple[int, int]:
-        u_prev = self.state.u
-        u_new = self.leak * u_prev + float(I)
-        self.state.u = u_new
-        if self.state.r > 0:
-            self.state.r -= 1
-            return 0, 0
-        theta_eff = self.theta_base * float(beta)
-        spike = 0
-        suppressed = 0
-        if u_new >= theta_eff:
-            spike = 1
-            self.state.u = 0.0
-            if self.rho > 0:
-                self.state.r = self.rho
-        else:
-            if beta > 1.0 and self.theta_base <= u_new < theta_eff:
-                suppressed = 1
-        return spike, suppressed
+    def step(self, I: float, beta: float = 1.0) -> tuple[bool, bool]:
+        if self._r > 0:
+            self._r -= 1
+            return False, False
+        self.theta = self.theta_base * float(beta)
+        u_before = float(self.u)
+        u_candidate = self.leak * u_before + float(I)
+        theta_eff = self.theta
+        if u_candidate >= theta_eff:
+            self.u = 0.0
+            self._r = self.refractory
+            return True, False
+        suppressed = False
+        if beta > 1.0 and u_candidate >= self.theta_base and u_candidate < theta_eff:
+            suppressed = True
+        self.u = u_candidate
+        return False, suppressed
 
 class LIFAggregator:
-    def __init__(self, leak: float, theta: float) -> None:
+    def __init__(self, leak: float = 0.995, theta: float = 10.0, refractory: int = 0):
         self.leak = float(leak)
         self.theta = float(theta)
+        self.refractory = int(refractory)
         self.v = 0.0
+        self._r = 0
 
     def reset(self) -> None:
         self.v = 0.0
+        self._r = 0
 
-    def step(self, x: float) -> int:
-        self.v = self.leak * self.v + float(x)
+    def step(self, input_strength: float = 1.0) -> bool:
+        if self._r > 0:
+            self._r -= 1
+            return False
+        self.v = self.leak * self.v + float(input_strength)
         if self.v >= self.theta:
             self.v = 0.0
-            return 1
-        return 0
+            self._r = self.refractory
+            return True
+        return False
