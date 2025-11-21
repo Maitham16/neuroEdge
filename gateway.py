@@ -8,10 +8,12 @@ from typing import Dict, Any, List, Optional
 from .lif import LIFAggregator
 from .inhibition import InhibitionState
 
+
 @dataclass
 class GatewayStats:
     fires: int = 0
     suppressed_total: int = 0
+
 
 class Gateway:
     def __init__(
@@ -40,10 +42,6 @@ class Gateway:
         self.retention_multiplier = float(retention_multiplier)
         self.min_retention_s = float(min_retention_s)
         self._recent_msgs: deque[Dict[str, Any]] = deque(maxlen=max_recent)
-        self._recent_transmissions: List[Dict[str, Any]] = []
-        self._per_node_energy: Dict[int, float] = {}
-        self._per_node_collisions: Dict[int, int] = {}
-        self._per_node_pairwise: Dict[int, int] = {}
         self._lock = Lock()
         self._stop = Event()
         self.stats = GatewayStats()
@@ -65,51 +63,6 @@ class Gateway:
         t_pay = payload_symb * tsym
         return t_pre + t_pay
 
-    def _update_collisions(self, msg: Dict[str, Any], start_s: float, end_s: float, is_spike: bool) -> None:
-        node = msg.get("node")
-        if node is None:
-            return
-        node_int = int(node)
-        overlaps: List[Dict[str, Any]] = []
-        for entry in list(self._recent_transmissions):
-            s = entry.get("start_s")
-            e = entry.get("end_s")
-            other_node = entry.get("node")
-            other_spike = bool(entry.get("spike", False))
-            if e is None or s is None:
-                continue
-            if e <= start_s or s >= end_s:
-                continue
-            if other_node == node_int:
-                continue
-            if self.collision_mode == "spikes":
-                if not (is_spike and other_spike):
-                    continue
-            overlaps.append(entry)
-        pair_count = len(overlaps)
-        msg["pairwise_collisions"] = pair_count
-        collided = pair_count > 0
-        msg["collided"] = collided
-        for entry in overlaps:
-            other_node = int(entry.get("node"))
-            self._per_node_pairwise[other_node] = self._per_node_pairwise.get(other_node, 0) + 1
-            if not entry.get("collided_reported"):
-                entry["collided_reported"] = True
-                self._per_node_collisions[other_node] = self._per_node_collisions.get(other_node, 0) + 1
-        if collided:
-            self._per_node_collisions[node_int] = self._per_node_collisions.get(node_int, 0) + 1
-            self._per_node_pairwise[node_int] = self._per_node_pairwise.get(node_int, 0) + pair_count
-        entry = {
-            "node": node_int,
-            "start_s": start_s,
-            "end_s": end_s,
-            "spike": bool(is_spike),
-            "collided_reported": collided,
-        }
-        self._recent_transmissions.append(entry)
-        cutoff = time.time() - max(self.min_retention_s, (end_s - start_s) * self.retention_multiplier)
-        self._recent_transmissions = [t for t in self._recent_transmissions if t.get("end_s", 0.0) >= cutoff]
-
     def _process_message(self, msg: Dict[str, Any]) -> None:
         now = time.time()
         airtime = self._lorawan_airtime(self.payload_bytes)
@@ -120,12 +73,7 @@ class Gateway:
         msg["energy_j"] = energy
         msg["start_s"] = start_s
         msg["end_s"] = end_s
-        node = msg.get("node")
-        if node is not None:
-            node_int = int(node)
-            self._per_node_energy[node_int] = self._per_node_energy.get(node_int, 0.0) + energy
         spike_flag = int(msg.get("spike", 0)) == 1
-        self._update_collisions(msg, start_s, end_s, spike_flag)
         if spike_flag:
             fired = self.aggregator.step(1.0)
             if fired:
@@ -154,6 +102,84 @@ class Gateway:
         while not self._stop.is_set():
             self.loop_once(timeout=timeout)
 
+    def _compute_collisions(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        for d in data:
+            d["collided"] = False
+            d["pairwise_collisions"] = 0
+        candidates = []
+        for idx, d in enumerate(data):
+            node = d.get("node")
+            if node is None:
+                continue
+            try:
+                node_int = int(node)
+            except Exception:
+                continue
+            try:
+                start_s = float(d.get("start_s"))
+                end_s = float(d.get("end_s"))
+            except Exception:
+                continue
+            if self.collision_mode == "spikes":
+                is_spike = int(d.get("spike", 0)) == 1
+                if not is_spike:
+                    continue
+            candidates.append(
+                {
+                    "idx": idx,
+                    "node": node_int,
+                    "start_s": start_s,
+                    "end_s": end_s,
+                }
+            )
+        candidates.sort(key=lambda x: x["start_s"])
+        n = len(candidates)
+        for i in range(n):
+            ci = candidates[i]
+            j = i + 1
+            while j < n:
+                cj = candidates[j]
+                if cj["start_s"] >= ci["end_s"]:
+                    break
+                if cj["node"] != ci["node"]:
+                    di = data[ci["idx"]]
+                    dj = data[cj["idx"]]
+                    di["collided"] = True
+                    dj["collided"] = True
+                    di["pairwise_collisions"] += 1
+                    dj["pairwise_collisions"] += 1
+                j += 1
+        per_node_collisions: Dict[str, int] = {}
+        per_node_pairwise: Dict[str, int] = {}
+        total_collided_messages = 0
+        sum_pairwise = 0
+        for d in data:
+            node = d.get("node")
+            if node is None:
+                continue
+            node_str = str(node)
+            if d.get("collided"):
+                total_collided_messages += 1
+                per_node_collisions[node_str] = per_node_collisions.get(node_str, 0) + 1
+            pc = d.get("pairwise_collisions", 0)
+            if isinstance(pc, (int, float)):
+                val = int(pc)
+            else:
+                try:
+                    val = int(pc)
+                except Exception:
+                    val = 0
+            if val:
+                per_node_pairwise[node_str] = per_node_pairwise.get(node_str, 0) + val
+                sum_pairwise += val
+        total_pairwise_overlaps = sum_pairwise // 2
+        return {
+            "per_node_collisions": per_node_collisions,
+            "per_node_pairwise": per_node_pairwise,
+            "total_collided_messages": total_collided_messages,
+            "total_pairwise_overlaps": total_pairwise_overlaps,
+        }
+
     def snapshot_metrics(self) -> Dict[str, Any]:
         with self._lock:
             data = list(self._recent_msgs)
@@ -161,40 +187,18 @@ class Gateway:
             nodes_values: Dict[str, Dict[str, float]] = {}
             for d in data:
                 ts = d.get("ts")
-                node = str(d.get("node"))
+                node = d.get("node")
                 if ts is None or node is None:
                     continue
-                nodes_values.setdefault(node, {})
+                key = str(node)
+                nodes_values.setdefault(key, {})
                 try:
-                    nodes_values[node][ts] = float(d.get("value", 0.0))
+                    nodes_values[key][ts] = float(d.get("value", 0.0))
                 except Exception:
-                    nodes_values[node][ts] = 0.0
+                    nodes_values[key][ts] = 0.0
             nodes = {}
             for node, series in nodes_values.items():
                 nodes[node] = {"values": [series.get(ts) for ts in timestamps]}
-            summary: Dict[str, Dict[str, float]] = {}
-            for node_str, energy in self._per_node_energy.items():
-                key = str(node_str)
-                summary.setdefault(key, {})
-                summary[key]["energy_total"] = energy
-            for node_int, coll in self._per_node_collisions.items():
-                key = str(node_int)
-                summary.setdefault(key, {})
-                summary[key]["collisions"] = coll
-            for node_int, pair in self._per_node_pairwise.items():
-                key = str(node_int)
-                summary.setdefault(key, {})
-                summary[key]["pairwise_collisions"] = pair
-            for node_str in nodes.keys():
-                if node_str not in summary:
-                    summary[node_str] = {}
-            for node_str in nodes.keys():
-                count = sum(1 for d in data if str(d.get("node")) == node_str)
-                entry = summary.setdefault(node_str, {})
-                entry.setdefault("energy_total", 0.0)
-                entry.setdefault("collisions", 0)
-                entry.setdefault("pairwise_collisions", 0)
-                entry["count"] = count
             if data:
                 now = time.time()
                 window = 60.0
@@ -203,16 +207,55 @@ class Gateway:
                     ss = d.get("start_s")
                     if ss is None:
                         continue
-                    if float(ss) >= now - window:
+                    try:
+                        ssv = float(ss)
+                    except Exception:
+                        continue
+                    if ssv >= now - window:
                         count += 1
                 msgs_per_sec = count / window
                 last_iso = data[-1].get("ts")
             else:
                 msgs_per_sec = 0.0
                 last_iso = None
+            collisions_info = self._compute_collisions(data) if data else {
+                "per_node_collisions": {},
+                "per_node_pairwise": {},
+                "total_collided_messages": 0,
+                "total_pairwise_overlaps": 0,
+            }
+            per_node_collisions = collisions_info["per_node_collisions"]
+            per_node_pairwise = collisions_info["per_node_pairwise"]
+            summary: Dict[str, Dict[str, float]] = {}
+            for d in data:
+                node = d.get("node")
+                if node is None:
+                    continue
+                key = str(node)
+                entry = summary.setdefault(
+                    key,
+                    {"count": 0, "energy_total": 0.0, "collisions": 0, "pairwise_collisions": 0},
+                )
+                entry["count"] += 1
+                e = d.get("energy_j")
+                if e is not None:
+                    try:
+                        entry["energy_total"] += float(e)
+                    except Exception:
+                        pass
+            for key, c in per_node_collisions.items():
+                entry = summary.setdefault(
+                    key,
+                    {"count": 0, "energy_total": 0.0, "collisions": 0, "pairwise_collisions": 0},
+                )
+                entry["collisions"] = c
+            for key, p in per_node_pairwise.items():
+                entry = summary.setdefault(
+                    key,
+                    {"count": 0, "energy_total": 0.0, "collisions": 0, "pairwise_collisions": 0},
+                )
+                entry["pairwise_collisions"] = p
             total_messages = len(data)
-            total_collisions = sum(self._per_node_collisions.values()) if self._per_node_collisions else 0
-            total_pairwise = sum(self._per_node_pairwise.values()) if self._per_node_pairwise else 0
             agg = {
                 "fires": self.stats.fires,
                 "theta": self.aggregator.theta,
@@ -225,8 +268,8 @@ class Gateway:
                 "msgs_per_sec": msgs_per_sec,
                 "aggregator": agg,
                 "total_messages": total_messages,
-                "total_collided_messages": total_collisions,
-                "total_pairwise_overlaps": total_pairwise,
+                "total_collided_messages": collisions_info["total_collided_messages"],
+                "total_pairwise_overlaps": collisions_info["total_pairwise_overlaps"],
                 "collision_mode": self.collision_mode,
                 "inhibition": self.inhibition.snapshot(),
                 "last_updated_iso": last_iso,
