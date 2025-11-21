@@ -4,7 +4,8 @@ from collections import deque
 from dataclasses import dataclass
 from queue import Queue, Empty
 from threading import Event, Lock
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, Optional
+
 from .lif import LIFAggregator
 from .inhibition import InhibitionState
 
@@ -26,9 +27,9 @@ class Gateway:
         t_inh_steps: int,
         tx_power_w: float,
         payload_bytes: int,
-        collision_mode: str,
-        retention_multiplier: float,
-        min_retention_s: float,
+        collision_mode: str = "spikes",
+        retention_multiplier: float = 10.0,
+        min_retention_s: float = 2.0,
         max_recent: int = 5000,
     ) -> None:
         self.inq = inq
@@ -38,13 +39,22 @@ class Gateway:
         self.t_inh_steps = int(t_inh_steps)
         self.tx_power_w = float(tx_power_w)
         self.payload_bytes = int(payload_bytes)
-        self.collision_mode = collision_mode
+        self.collision_mode = str(collision_mode)
         self.retention_multiplier = float(retention_multiplier)
         self.min_retention_s = float(min_retention_s)
+
         self._recent_msgs: deque[Dict[str, Any]] = deque(maxlen=max_recent)
+        self._recent_tx: list[Dict[str, Any]] = []
+
+        self._total_messages = 0
+        self._total_collided_messages = 0
+        self._total_pairwise_overlaps = 0
+        self._per_node_collisions: Dict[int, int] = {}
+        self._per_node_pairwise: Dict[int, int] = {}
+
+        self.stats = GatewayStats()
         self._lock = Lock()
         self._stop = Event()
-        self.stats = GatewayStats()
 
     def stop(self) -> None:
         self._stop.set()
@@ -69,16 +79,19 @@ class Gateway:
         energy = airtime * self.tx_power_w
         start_s = now
         end_s = now + airtime
+
         msg["airtime_s"] = airtime
         msg["energy_j"] = energy
         msg["start_s"] = start_s
         msg["end_s"] = end_s
+
         spike_flag = int(msg.get("spike", 0)) == 1
         if spike_flag:
             fired = self.aggregator.step(1.0)
             if fired:
                 self.stats.fires += 1
                 self.inhibition.activate(self.beta, self.t_inh_steps)
+
         st = msg.get("suppressed_total")
         if st is not None:
             try:
@@ -87,7 +100,62 @@ class Gateway:
                 st_int = None
             if st_int is not None and st_int > self.stats.suppressed_total:
                 self.stats.suppressed_total = st_int
+
         self._recent_msgs.append(msg)
+        self._total_messages += 1
+
+        node_raw = msg.get("node")
+        try:
+            node_id = int(node_raw)
+        except Exception:
+            node_id = None
+
+        if node_id is None:
+            return
+
+        if self.collision_mode == "spikes":
+            is_tx = spike_flag
+        else:
+            is_tx = True
+
+        new_entry = {
+            "node": node_id,
+            "start": start_s,
+            "end": end_s,
+            "is_tx": bool(is_tx),
+            "collided": False,
+        }
+
+        if is_tx:
+            overlaps: list[Dict[str, Any]] = []
+            for ent in self._recent_tx:
+                if not ent.get("is_tx", False):
+                    continue
+                if ent.get("node") == node_id:
+                    continue
+                s = float(ent.get("start", 0.0))
+                e = float(ent.get("end", 0.0))
+                if e <= start_s or s >= end_s:
+                    continue
+                overlaps.append(ent)
+
+            if overlaps:
+                self._total_pairwise_overlaps += len(overlaps)
+                for ent in overlaps:
+                    other = int(ent["node"])
+                    self._per_node_pairwise[other] = self._per_node_pairwise.get(other, 0) + 1
+                    if not ent.get("collided", False):
+                        ent["collided"] = True
+                        self._total_collided_messages += 1
+                        self._per_node_collisions[other] = self._per_node_collisions.get(other, 0) + 1
+                new_entry["collided"] = True
+                self._total_collided_messages += 1
+                self._per_node_collisions[node_id] = self._per_node_collisions.get(node_id, 0) + 1
+                self._per_node_pairwise[node_id] = self._per_node_pairwise.get(node_id, 0) + len(overlaps)
+
+        self._recent_tx.append(new_entry)
+        cutoff = time.time() - max(self.min_retention_s, airtime * self.retention_multiplier)
+        self._recent_tx = [t for t in self._recent_tx if float(t.get("end", 0.0)) >= cutoff]
 
     def loop_once(self, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
         try:
@@ -102,88 +170,11 @@ class Gateway:
         while not self._stop.is_set():
             self.loop_once(timeout=timeout)
 
-    def _compute_collisions(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
-        for d in data:
-            d["collided"] = False
-            d["pairwise_collisions"] = 0
-        candidates = []
-        for idx, d in enumerate(data):
-            node = d.get("node")
-            if node is None:
-                continue
-            try:
-                node_int = int(node)
-            except Exception:
-                continue
-            try:
-                start_s = float(d.get("start_s"))
-                end_s = float(d.get("end_s"))
-            except Exception:
-                continue
-            if self.collision_mode == "spikes":
-                is_spike = int(d.get("spike", 0)) == 1
-                if not is_spike:
-                    continue
-            candidates.append(
-                {
-                    "idx": idx,
-                    "node": node_int,
-                    "start_s": start_s,
-                    "end_s": end_s,
-                }
-            )
-        candidates.sort(key=lambda x: x["start_s"])
-        n = len(candidates)
-        for i in range(n):
-            ci = candidates[i]
-            j = i + 1
-            while j < n:
-                cj = candidates[j]
-                if cj["start_s"] >= ci["end_s"]:
-                    break
-                if cj["node"] != ci["node"]:
-                    di = data[ci["idx"]]
-                    dj = data[cj["idx"]]
-                    di["collided"] = True
-                    dj["collided"] = True
-                    di["pairwise_collisions"] += 1
-                    dj["pairwise_collisions"] += 1
-                j += 1
-        per_node_collisions: Dict[str, int] = {}
-        per_node_pairwise: Dict[str, int] = {}
-        total_collided_messages = 0
-        sum_pairwise = 0
-        for d in data:
-            node = d.get("node")
-            if node is None:
-                continue
-            node_str = str(node)
-            if d.get("collided"):
-                total_collided_messages += 1
-                per_node_collisions[node_str] = per_node_collisions.get(node_str, 0) + 1
-            pc = d.get("pairwise_collisions", 0)
-            if isinstance(pc, (int, float)):
-                val = int(pc)
-            else:
-                try:
-                    val = int(pc)
-                except Exception:
-                    val = 0
-            if val:
-                per_node_pairwise[node_str] = per_node_pairwise.get(node_str, 0) + val
-                sum_pairwise += val
-        total_pairwise_overlaps = sum_pairwise // 2
-        return {
-            "per_node_collisions": per_node_collisions,
-            "per_node_pairwise": per_node_pairwise,
-            "total_collided_messages": total_collided_messages,
-            "total_pairwise_overlaps": total_pairwise_overlaps,
-        }
-
     def snapshot_metrics(self) -> Dict[str, Any]:
         with self._lock:
             data = list(self._recent_msgs)
             timestamps = [d.get("ts") for d in data]
+
             nodes_values: Dict[str, Dict[str, float]] = {}
             for d in data:
                 ts = d.get("ts")
@@ -196,9 +187,11 @@ class Gateway:
                     nodes_values[key][ts] = float(d.get("value", 0.0))
                 except Exception:
                     nodes_values[key][ts] = 0.0
-            nodes = {}
-            for node, series in nodes_values.items():
-                nodes[node] = {"values": [series.get(ts) for ts in timestamps]}
+
+            nodes: Dict[str, Dict[str, Any]] = {}
+            for key, series in nodes_values.items():
+                nodes[key] = {"values": [series.get(ts) for ts in timestamps]}
+
             if data:
                 now = time.time()
                 window = 60.0
@@ -218,14 +211,7 @@ class Gateway:
             else:
                 msgs_per_sec = 0.0
                 last_iso = None
-            collisions_info = self._compute_collisions(data) if data else {
-                "per_node_collisions": {},
-                "per_node_pairwise": {},
-                "total_collided_messages": 0,
-                "total_pairwise_overlaps": 0,
-            }
-            per_node_collisions = collisions_info["per_node_collisions"]
-            per_node_pairwise = collisions_info["per_node_pairwise"]
+
             summary: Dict[str, Dict[str, float]] = {}
             for d in data:
                 node = d.get("node")
@@ -243,33 +229,38 @@ class Gateway:
                         entry["energy_total"] += float(e)
                     except Exception:
                         pass
-            for key, c in per_node_collisions.items():
+
+            for node_int, c in self._per_node_collisions.items():
+                key = str(node_int)
                 entry = summary.setdefault(
                     key,
                     {"count": 0, "energy_total": 0.0, "collisions": 0, "pairwise_collisions": 0},
                 )
                 entry["collisions"] = c
-            for key, p in per_node_pairwise.items():
+
+            for node_int, p in self._per_node_pairwise.items():
+                key = str(node_int)
                 entry = summary.setdefault(
                     key,
                     {"count": 0, "energy_total": 0.0, "collisions": 0, "pairwise_collisions": 0},
                 )
                 entry["pairwise_collisions"] = p
-            total_messages = len(data)
+
             agg = {
                 "fires": self.stats.fires,
                 "theta": self.aggregator.theta,
                 "suppressed_total": self.stats.suppressed_total,
             }
+
             return {
                 "nodes": nodes,
                 "timestamps": timestamps,
                 "summary": summary,
                 "msgs_per_sec": msgs_per_sec,
                 "aggregator": agg,
-                "total_messages": total_messages,
-                "total_collided_messages": collisions_info["total_collided_messages"],
-                "total_pairwise_overlaps": collisions_info["total_pairwise_overlaps"],
+                "total_messages": self._total_messages,
+                "total_collided_messages": self._total_collided_messages,
+                "total_pairwise_overlaps": self._total_pairwise_overlaps,
                 "collision_mode": self.collision_mode,
                 "inhibition": self.inhibition.snapshot(),
                 "last_updated_iso": last_iso,

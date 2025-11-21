@@ -9,7 +9,7 @@ HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>EdgeSim Network Dashboard</title>
+<title>EdgeSynapse: Towards Leaky-Spike Transmission for Sustainable Edge Sensing Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
 *{box-sizing:border-box}
@@ -47,7 +47,7 @@ canvas{width:100%;height:100%}
 <body>
 <div class="header">
 <div>
-<div class="header-title">EdgeSim Network Dashboard</div>
+<div class="header-title">EdgeSynapse: Towards Leaky-Spike Transmission for Sustainable Edge Sensing Dashboard</div>
 <div class="header-sub">LIF-based spiking, inhibition and LoRa energy model</div>
 </div>
 <div class="badge" id="lastUpdated">waiting data</div>
@@ -72,9 +72,9 @@ canvas{width:100%;height:100%}
 <div class="card-value" id="kpiSuppressed">-</div>
 </div>
 <div class="card">
-<div class="card-label">Overlapping TX pairs</div>
-<div class="card-value" id="kpiPairs">-</div>
-<div class="card-sub" id="kpiCollMode">mode: -</div>
+  <div class="card-label">Collided messages</div>
+  <div class="card-value" id="kpiPairs">-</div>
+  <div class="card-sub" id="kpiCollMode">mode: -</div>
 </div>
 <div class="card">
 <div class="card-label">Inhibition</div>
@@ -128,8 +128,8 @@ canvas{width:100%;height:100%}
 </div>
 <div class="panel">
 <div class="panel-header">
-<div class="panel-title">Nodes with overlapping TX</div>
-<div class="panel-meta">messages whose airtime overlapped other nodes</div>
+  <div class="panel-title">Collided messages per node</div>
+  <div class="panel-meta">messages whose airtime overlapped other nodes</div>
 </div>
 <div class="chart-block">
 <canvas id="collisionChart"></canvas>
@@ -154,6 +154,7 @@ let rateChart;
 let selectedNodes={};
 let rateHistory=[];
 let fetchTimer=null;
+
 function initCharts(){
 const tsCtx=document.getElementById("tsChart").getContext("2d");
 const enCtx=document.getElementById("energyChart").getContext("2d");
@@ -164,11 +165,13 @@ energyChart=new Chart(enCtx,{type:"bar",data:{labels:[],datasets:[{label:"Energy
 collisionChart=new Chart(colCtx,{type:"bar",data:{labels:[],datasets:[{label:"Overlapping TX",data:[]}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{font:{size:10}}},y:{ticks:{font:{size:10}},beginAtZero:true,precision:0}}}});
 rateChart=new Chart(rateCtx,{type:"line",data:{labels:[],datasets:[{label:"msg/s",data:[]}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{maxRotation:0,font:{size:10}}},y:{ticks:{font:{size:10}},beginAtZero:true}}}});
 }
+
 function formatTime(ts){
 if(!ts)return"";
 const d=new Date(ts);
 return d.toLocaleTimeString("en-GB",{hour12:false});
 }
+
 function buildNodeList(nodes){
 const ids=Object.keys(nodes).sort(function(a,b){return Number(a)-Number(b)});
 const container=document.getElementById("nodeList");
@@ -188,56 +191,19 @@ if(selectedNodes[id])selected+=1;
 });
 document.getElementById("nodeMeta").textContent="selected: "+selected+"/"+ids.length;
 }
-function computeRange(nodes,timestamps){
-let vmin=Infinity;
-let vmax=-Infinity;
-Object.keys(nodes).forEach(function(id){
-if(!selectedNodes[id])return;
-const vals=nodes[id].values||[];
-for(let i=0;i<vals.length;i++){
-const v=vals[i];
-if(v===null||v===undefined)continue;
-if(v<vmin)vmin=v;
-if(v>vmax)vmax=v;
-}
-});
-if(!isFinite(vmin)||!isFinite(vmax))return null;
-if(vmin===vmax){vmin=vmin-1;vmax=vmax+1;}
-const span=vmax-vmin;
-const pad=0.05*span;
-return{min:vmin-pad,max:vmax+pad};
-}
+
 function updateCharts(metrics){
 const ts=metrics.timestamps||[];
 const nodes=metrics.nodes||{};
 buildNodeList(nodes);
 const datasets=[];
-const sigma=parseFloat(document.getElementById("sigma").value)||2.0;
 let globalMin=null;
 let globalMax=null;
-Object.keys(nodes).forEach(function(id,index){
+
+Object.keys(nodes).forEach(function(id){
 if(!selectedNodes[id])return;
 const vals=nodes[id].values||[];
 datasets.push({label:"Node "+id,data:vals,borderWidth:1,pointRadius:0.5});
-const arr=vals.filter(function(v){return v!==null&&v!==undefined});
-if(arr.length>1){
-const n=arr.length;
-let sum=0;
-for(let i=0;i<n;i++)sum+=arr[i];
-const mean=sum/n;
-let varg=0;
-for(let i=0;i<n;i++){const d=arr[i]-mean;varg+=d*d;}
-varg=varg/n;
-const std=Math.sqrt(varg);
-for(let i=0;i<vals.length;i++){
-const v=vals[i];
-if(v===null||v===undefined)continue;
-if(std>0&&v>mean+sigma*std){
-const t=ts[i];
-if(t)rateHistory.push({node:id,ts:t,value:v});
-}
-}
-}
 for(let i=0;i<vals.length;i++){
 const v=vals[i];
 if(v===null||v===undefined)continue;
@@ -245,6 +211,7 @@ if(globalMin===null||v<globalMin)globalMin=v;
 if(globalMax===null||v>globalMax)globalMax=v;
 }
 });
+
 tsChart.data.labels=ts.map(formatTime);
 tsChart.data.datasets=datasets;
 if(globalMin!==null&&globalMax!==null){
@@ -260,16 +227,20 @@ tsChart.options.scales.y.max=undefined;
 document.getElementById("rangeInfo").textContent="range: -";
 }
 tsChart.update();
+
 const summary=metrics.summary||{};
 const nodeIds=Object.keys(summary).sort(function(a,b){return Number(a)-Number(b)});
 energyChart.data.labels=nodeIds.map(function(id){return"Node "+id});
 energyChart.data.datasets[0].data=nodeIds.map(function(id){return summary[id].energy_total||0});
 energyChart.update();
+
 collisionChart.data.labels=nodeIds.map(function(id){return"Node "+id});
 collisionChart.data.datasets[0].data=nodeIds.map(function(id){return summary[id].collisions||0});
 collisionChart.update();
+
 const nowIso=metrics.last_updated_iso;
 if(nowIso)document.getElementById("lastUpdated").textContent=formatTime(nowIso);
+
 const rate=metrics.msgs_per_sec||0;
 const now=new Date().toISOString();
 rateHistory.push({ts:now,rate:rate});
@@ -278,9 +249,9 @@ rateChart.data.labels=rateHistory.map(function(r){return formatTime(r.ts)});
 rateChart.data.datasets[0].data=rateHistory.map(function(r){return r.rate});
 rateChart.update();
 }
+
 function updateKpis(metrics){
 const nodes=metrics.nodes||{};
-const summary=metrics.summary||{};
 document.getElementById("kpiNodes").textContent=Object.keys(nodes).length;
 document.getElementById("kpiMessages").textContent=metrics.total_messages||0;
 const rate=metrics.msgs_per_sec||0;
@@ -289,16 +260,19 @@ rateLabel.textContent=rate.toFixed(2)+" msg/s";
 if(rate<0.1){rateLabel.className="card-sub kpi-strong";}
 else if(rate<1.0){rateLabel.className="card-sub kpi-warn";}
 else{rateLabel.className="card-sub kpi-bad";}
+
 const agg=metrics.aggregator||{};
 document.getElementById("kpiAggFires").textContent=agg.fires||0;
 document.getElementById("kpiAggTheta").textContent="θ: "+(agg.theta!=null?Number(agg.theta).toFixed(1):"-");
 document.getElementById("kpiSuppressed").textContent=agg.suppressed_total||0;
-document.getElementById("kpiPairs").textContent=metrics.total_pairwise_overlaps||0;
+
+document.getElementById("kpiPairs").textContent = metrics.total_collided_messages || 0;
 const modeRaw=metrics.collision_mode||"-";
 let modeLabel=modeRaw;
 if(modeRaw==="spikes")modeLabel="spike packets only";
 if(modeRaw==="all")modeLabel="all packets";
 document.getElementById("kpiCollMode").textContent="mode: "+modeLabel;
+
 const inh=metrics.inhibition||{};
 const beta=inh.beta!=null?Number(inh.beta):1.0;
 document.getElementById("kpiBeta").textContent="β="+beta.toFixed(2);
@@ -306,7 +280,9 @@ const now=timeNowSeconds();
 const expiry=inh.expiry_ts||0;
 document.getElementById("kpiInhState").textContent=expiry>now?"active":"idle";
 }
+
 function timeNowSeconds(){return Date.now()/1000.0;}
+
 async function fetchMetrics(){
 if(document.getElementById("pause").checked)return;
 try{
@@ -316,12 +292,14 @@ updateKpis(m);
 updateCharts(m);
 }catch(e){}
 }
+
 function scheduleFetch(){
 if(fetchTimer!==null)clearInterval(fetchTimer);
 let interval=parseInt(document.getElementById("refresh").value,10);
 if(!interval||interval<1)interval=2;
 fetchTimer=setInterval(fetchMetrics,interval*1000);
 }
+
 document.getElementById("refresh").addEventListener("change",scheduleFetch);
 initCharts();
 scheduleFetch();
@@ -347,7 +325,9 @@ def make_app(gateway: "Gateway") -> Callable:
                 return [data.encode("utf-8")]
             except Exception as e:
                 payload = json.dumps({"error": str(e)})
-                start_response("500 Internal Server Error", [("Content-Type", "application/json")])
+                start_response(
+                    "500 Internal Server Error", [("Content-Type", "application/json")]
+                )
                 return [payload.encode("utf-8")]
         if path == "/":
             headers = [("Content-Type", "text/html; charset=utf-8")]
