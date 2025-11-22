@@ -4,7 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 from queue import Queue, Empty
 from threading import Event, Lock
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Callable
 from lif import LIFAggregator
 from inhibition import InhibitionState
 
@@ -28,6 +28,7 @@ class Gateway:
         retention_multiplier: float = 10.0,
         min_retention_s: float = 2.0,
         max_recent: int = 5000,
+        on_fire: Optional[Callable[[float, int], None]] = None,
     ) -> None:
         self.inq = inq
         self.inhibition = inhibition
@@ -50,6 +51,7 @@ class Gateway:
         self.stats = GatewayStats()
         self._lock = Lock()
         self._stop = Event()
+        self._on_fire = on_fire
 
     def stop(self) -> None:
         self._stop.set()
@@ -84,6 +86,8 @@ class Gateway:
             if fired:
                 self.stats.fires += 1
                 self.inhibition.activate(self.beta, self.t_inh_steps)
+                if self._on_fire is not None:
+                    self._on_fire(self.beta, self.t_inh_steps)
         node_raw = msg.get("node")
         try:
             node_id = int(node_raw)
@@ -144,7 +148,7 @@ class Gateway:
         cutoff = time.time() - max(self.min_retention_s, airtime * self.retention_multiplier)
         self._recent_tx = [t for t in self._recent_tx if float(t.get("end", 0.0)) >= cutoff]
 
-    def loop_once(self, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
+    def loop_once(self, timeout: float = 0.5):
         try:
             msg = self.inq.get(timeout=timeout)
         except Empty:
