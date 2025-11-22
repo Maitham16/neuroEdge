@@ -8,7 +8,7 @@ HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>EdgeSim Network Dashboard</title>
+<title>EdgeSynapse: Towards Leaky-Spike Transmission for Sustainable Edge Sensing Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
 *{box-sizing:border-box}
@@ -46,7 +46,7 @@ canvas{width:100%;height:100%}
 <body>
 <div class="header">
 <div>
-<div class="header-title">EdgeSim Network Dashboard</div>
+<div class="header-title">EdgeSynapse: Towards Leaky-Spike Transmission for Sustainable Edge Sensing Dashboard</div>
 <div class="header-sub">LIF-based spiking, inhibition and LoRa energy model</div>
 </div>
 <div class="badge" id="lastUpdated">waiting data</div>
